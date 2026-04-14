@@ -1,4 +1,4 @@
-import os                                                                 # Import os so the script can build file paths safely on your computer.
+import os                                                                 # Import os for script able to build file paths safely on computer.
 import json                                                               # Import json so the script can save a summary file at the end.
 import hashlib                                                            # Import hashlib to rebuild the same stable article_id logic used in ETL.
 import pandas as pd                                                       # Import pandas for loading parquet files and preparing tabular training data.
@@ -19,8 +19,12 @@ ALL_OUTPUT_PATH = os.path.join(DATA_DIR, "all_interactions.parquet")      # Outp
 ARTICLES_OUTPUT_PATH = os.path.join(DATA_DIR, "training_articles.parquet")# Output parquet file for article metadata aligned to final interactions.
 SUMMARY_OUTPUT_PATH = os.path.join(DATA_DIR, "training_summary.json")     # Output JSON file for a readable summary of the prepared dataset.
 
-MIND_TRAIN_NEWS_PATH = os.path.join(BASE_DIR, "..", "MINDsmall_train", "news.tsv")  # Local raw MIND training news file used to map news_id to final article_id.
-MIND_DEV_NEWS_PATH = os.path.join(BASE_DIR, "..", "MINDsmall_dev", "news.tsv")      # Local raw MIND dev news file used to map news_id to final article_id.
+MIND_NEWS_CANDIDATES = [                                                  # Try several possible local MIND news file names so the mapping step is more robust.
+    os.path.join(BASE_DIR, "..", "MINDsmall_train", "news.tsv"),          # Standard MIND train news file name.
+    os.path.join(BASE_DIR, "..", "MINDsmall_train", "train_news.tsv"),    # Alternative renamed train news file name.
+    os.path.join(BASE_DIR, "..", "MINDsmall_dev", "news.tsv"),            # Standard MIND dev news file name.
+    os.path.join(BASE_DIR, "..", "MINDsmall_dev", "val_news.tsv"),        # Alternative renamed dev news file name.
+]
 
 RANDOM_STATE = 42                                                         # Fixed random seed so train/test splitting stays reproducible every run.
 
@@ -41,12 +45,13 @@ def normalize_time(series):                                               # Defi
 
 
 def load_mind_news_mapping():                                             # Define a helper function that reads local MIND news files and builds news_id -> final article_id mapping.
-    mind_dfs = []                                                         # Create a list to hold train and dev MIND news tables.
+    mind_dfs = []                                                         # Create a list to hold any MIND news tables that are found.
 
-    for path in [MIND_TRAIN_NEWS_PATH, MIND_DEV_NEWS_PATH]:               # Loop through both local MIND news.tsv files.
-        if os.path.exists(path):                                          # Only read the file if it actually exists on your machine.
+    for path in MIND_NEWS_CANDIDATES:                                     # Loop through all possible local MIND news file paths.
+        if os.path.exists(path):                                          # Only load the file if it really exists on your machine.
+            print(f"Loading MIND news mapping from: {path}")              # Print which file is being used so debugging is easier.
             df = pd.read_csv(                                             # Read the TSV file into pandas.
-                path,                                                     # Use the current train or dev news file path.
+                path,                                                     # Use the current MIND news file path.
                 sep="\t",                                                 # Tell pandas that the file is tab-separated.
                 header=None,                                              # MIND news.tsv does not come with a header row.
                 names=[                                                   # Assign readable column names manually.
@@ -61,13 +66,13 @@ def load_mind_news_mapping():                                             # Defi
                 ],
                 usecols=[0, 5],                                           # Only load news_id and url because that is enough for ID mapping.
             )
-            mind_dfs.append(df)                                           # Add the loaded dataframe to the list.
+            mind_dfs.append(df)                                           # Add the loaded dataframe into the list.
 
-    if not mind_dfs:                                                      # Check whether no MIND news files were found.
-        print("No local MIND news.tsv files found.")                      # Print a warning so you know the mapping step did not run.
-        return {}                                                         # Return an empty dictionary so the script can continue safely.
+    if not mind_dfs:                                                      # Check whether no MIND news file was found at all.
+        print("No local MIND news.tsv / train_news.tsv / val_news.tsv files found.")  # Print a warning to know why mapping failed.
+        return {}                                                         # Return an empty dictionary so the script can fail clearly later.
 
-    mind_news_df = pd.concat(mind_dfs, ignore_index=True)                 # Combine train and dev MIND news tables into one dataframe.
+    mind_news_df = pd.concat(mind_dfs, ignore_index=True)                 # Combine all found MIND news files into one dataframe.
     mind_news_df = mind_news_df.drop_duplicates(subset=["news_id"])       # Keep one row per MIND news_id to avoid duplicate mappings.
 
     mind_news_df["article_id"] = mind_news_df.apply(                      # Create final article_id values for every MIND news row.
@@ -97,8 +102,11 @@ valid_article_ids = set(articles_df["article_id"].astype(str).tolist())   # Buil
 
 mind_mapping = load_mind_news_mapping()                                   # Build MIND news_id -> hashed article_id mapping from local raw news.tsv files.
 
+print(f"Valid article IDs in articles.parquet: {len(valid_article_ids)}") # Print how many valid final article IDs exist in the article dataset.
+print(f"MIND mapping size: {len(mind_mapping)}")                          # Print how many MIND news_id -> article_id mappings were built.
+
 print("=== Behaviors sample ===")                                         # Print a label before showing a small sample of the behaviors table.
-print(behaviors_df.head(3))                                               # Print the first few behavior rows so you can visually inspect the data.
+print(behaviors_df.head(3))                                               # Print the first few behavior rows to visually inspect the data.
 
 if "article_id" not in behaviors_df.columns:                              # Check that the processed behaviors parquet still has an article_id column.
     raise ValueError("behaviors.parquet does not contain article_id column.")  # Stop with a clear error if the column is missing.
@@ -110,12 +118,19 @@ mind_clicks_df["user_id"] = mind_clicks_df["user_id"].astype(str)         # Forc
 mind_clicks_df["article_id_raw"] = mind_clicks_df["article_id"].astype(str)  # Keep the raw MIND news_id value before mapping it.
 mind_clicks_df["clicked"] = pd.to_numeric(mind_clicks_df["clicked"], errors="coerce").fillna(0).astype(int)  # Convert clicked flags safely into integers.
 mind_clicks_df = mind_clicks_df[mind_clicks_df["clicked"] == 1].copy()    # Keep only positive click events because these are the interactions used for recommendation training.
-mind_clicks_df["article_id"] = mind_clicks_df["article_id_raw"].map(mind_mapping)  # Map raw MIND news_id values into final hashed article_id values.
-mind_clicks_df["timestamp"] = normalize_time(mind_clicks_df["event_time"])  # Convert MIND event_time values into clean timestamps.
 
+print(f"MIND clicked rows before mapping filter: {len(mind_clicks_df)}")  # Print how many clicked MIND rows existed before mapping to final article IDs.
+
+mind_clicks_df["article_id"] = mind_clicks_df["article_id_raw"].map(mind_mapping)  # Map raw MIND news_id values into final hashed article_id values.
+
+print(f"MIND mapped article_id non-null: {mind_clicks_df['article_id'].notna().sum()}")  # Print how many clicked MIND rows mapped successfully.
+
+mind_clicks_df["timestamp"] = normalize_time(mind_clicks_df["event_time"])  # Convert MIND event_time values into clean timestamps.
 mind_clicks_df = mind_clicks_df[mind_clicks_df["article_id"].notna()].copy()  # Drop rows that could not be mapped to final article IDs.
 mind_clicks_df["article_id"] = mind_clicks_df["article_id"].astype(str)   # Force final article_id into string type.
 mind_clicks_df = mind_clicks_df[mind_clicks_df["article_id"].isin(valid_article_ids)].copy()  # Keep only clicks whose final article_id really exists in your article universe.
+
+print(f"MIND rows after valid article filter: {len(mind_clicks_df)}")     # Print how many mapped MIND rows survived the valid article_id filter.
 
 mind_clicks_df = mind_clicks_df[["user_id", "article_id", "timestamp"]].copy()  # Keep only the columns needed for model training.
 mind_clicks_df["rating"] = 1.0                                           # Assign implicit-feedback value 1.0 to each click event.
@@ -131,8 +146,9 @@ sim_clicks_df["action"] = sim_clicks_df["action"].astype(str).str.lower()  # Nor
 sim_clicks_df = sim_clicks_df[sim_clicks_df["action"] == "click"].copy() # Keep only click events from simulated logs.
 sim_clicks_df["article_id"] = sim_clicks_df["article_id"].astype(str)    # Force article_id to string.
 sim_clicks_df["timestamp"] = normalize_time(sim_clicks_df["timestamp"])  # Convert simulated log timestamps into clean datetime values.
-
 sim_clicks_df = sim_clicks_df[sim_clicks_df["article_id"].isin(valid_article_ids)].copy()  # Keep only simulated clicks that point to valid article IDs in your article dataset.
+
+print(f"Simulated click rows after valid article filter: {len(sim_clicks_df)}")  # Print how many simulated clicks matched real article IDs.
 
 sim_clicks_df = sim_clicks_df[["user_id", "article_id", "timestamp"]].copy()  # Keep only training-relevant columns.
 sim_clicks_df["rating"] = 1.0                                            # Assign implicit-feedback value 1.0 to each simulated click.
@@ -141,7 +157,6 @@ sim_clicks_df["source"] = "simulated_click"                              # Label
 all_interactions_df = pd.concat([mind_clicks_df, sim_clicks_df], ignore_index=True)  # Combine MIND clicks and simulated clicks into one training interaction table.
 all_interactions_df = all_interactions_df.dropna(subset=["user_id", "article_id", "timestamp"]).copy()  # Remove any row missing key training fields.
 all_interactions_df = all_interactions_df.drop_duplicates(subset=["user_id", "article_id", "timestamp", "source"]).copy()  # Remove exact duplicate interaction rows.
-
 all_interactions_df["timestamp"] = normalize_time(all_interactions_df["timestamp"])  # Re-normalize timestamps after concatenation just to keep the final table consistent.
 all_interactions_df = all_interactions_df.sort_values("timestamp").reset_index(drop=True)  # Sort interactions by time and reset the row index.
 
@@ -153,7 +168,7 @@ print("By source:")                                                      # Print
 print(all_interactions_df["source"].value_counts())                      # Print counts for mind_click and simulated_click separately.
 
 if len(all_interactions_df) == 0:                                        # Stop early if the final dataset ended up empty.
-    raise ValueError("No interactions available after preparation.")      # Raise a clear error so you know training cannot continue.
+    raise ValueError("No interactions available after preparation.")     # Raise a clear error to know if training cannot continue.
 
 train_df, test_df = train_test_split(                                    # Split the final interactions into train and test sets.
     all_interactions_df,                                                 # Use the full interaction dataframe as the input.
@@ -194,4 +209,4 @@ with open(SUMMARY_OUTPUT_PATH, "w", encoding="utf-8") as f:              # Open 
     json.dump(summary, f, indent=2)                                      # Save the summary dictionary as nicely formatted JSON.
 
 print("Training data prepared and saved successfully.")                  # Print the final success message.
-print(f"Sample MIND user IDs: {mind_clicks_df['user_id'].head(5).tolist()}")  # Print a few sample MIND user IDs so you can confirm real MIND users are present.
+print(f"Sample MIND user IDs: {mind_clicks_df['user_id'].head(5).tolist()}")  # Print a few sample MIND user IDs to confirm real MIND users are present.
