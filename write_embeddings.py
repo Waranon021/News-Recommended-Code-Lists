@@ -13,7 +13,7 @@ PROC_BUCKET = "news-recommending-processed-st125934"                      # Name
 ARTICLES_PREFIX = "articles/"                                             # Folder inside the processed bucket where article parquet files are stored.
 DYNAMO_TABLE = "article-embeddings"                                       # Name of the DynamoDB table where article embeddings will be saved.
 AWS_REGION = "ap-southeast-7"                                             # AWS region for your current account, which is Thailand here.
-MAX_ARTICLES = 5000                                                       # Maximum number of unique articles to embed in one run so runtime stays manageable.
+MAX_ARTICLES = 70000                                                      # Maximum number of unique articles to embed in one run so runtime stays manageable.
 MODEL_NAME = "all-MiniLM-L6-v2"                                           # Sentence-transformer model used to generate the embedding vectors.
 
 
